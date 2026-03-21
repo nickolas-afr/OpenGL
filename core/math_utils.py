@@ -14,6 +14,20 @@ def mat_perspective(fov_deg, aspect, near, far):
     ], dtype=np.float32)
 
 
+def mat_translate(x, y, z):
+    """Row-major 4×4 translation matrix."""
+    m = np.eye(4, dtype=np.float32)
+    m[0, 3] = x;  m[1, 3] = y;  m[2, 3] = z
+    return m
+
+
+def mat_scale(sx, sy, sz):
+    """Row-major 4×4 scale matrix."""
+    m = np.eye(4, dtype=np.float32)
+    m[0, 0] = sx;  m[1, 1] = sy;  m[2, 2] = sz
+    return m
+
+
 def mat_look_at(eye, target):
     e  = np.asarray(eye,    dtype=np.float64)
     t  = np.asarray(target, dtype=np.float64)

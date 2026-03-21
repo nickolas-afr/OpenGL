@@ -8,6 +8,34 @@ _QUAD_IDX    = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)
 _SKY_ATTRIBS = [(0, 3, 20, 0), (1, 2, 20, 12)]   # pos(3) + uv(2), stride=20 B
 
 
+def _catmull_rom(pts, subdivisions=8):
+    """
+    Subdivide a closed (x,z) polyline using Catmull-Rom splines.
+    Each original segment is replaced by `subdivisions` smooth samples.
+    Returns a (N*subdivisions, 2) float32 array that passes through every
+    original waypoint and produces smooth arcs through corners.
+    """
+    N   = len(pts)
+    out = []
+    for i in range(N):
+        p0 = pts[(i - 1) % N].astype(np.float64)
+        p1 = pts[i].astype(np.float64)
+        p2 = pts[(i + 1) % N].astype(np.float64)
+        p3 = pts[(i + 2) % N].astype(np.float64)
+        for k in range(subdivisions):
+            t  = k / subdivisions
+            t2 = t * t
+            t3 = t2 * t
+            q  = 0.5 * (
+                2.0 * p1
+                + (-p0 + p2)              * t
+                + (2*p0 - 5*p1 + 4*p2 - p3) * t2
+                + (-p0 + 3*p1 - 3*p2 + p3)  * t3
+            )
+            out.append(q)
+    return np.array(out, dtype=np.float32)
+
+
 def _sky_face(p0, p1, p2, p3, u0=0., u1=1., v0=0., v1=1.):
     """Quad vertices: BL p0, BR p1, TR p2, TL p3 (rendered with culling OFF)."""
     return np.array([
@@ -139,56 +167,135 @@ def build_pyramid(base_half, height):
     # stride=24 B: pos@0 B, normal@12 B
     attribs = [(0, 3, 24, 0), (1, 3, 24, 12)]
     return create_mesh(verts, idxs, attribs)
+
+
+def build_circuit(waypoints, road_half_w, y_offset=0.05, v_tile=0.04, subdivisions=8):
     """
-    Generate a terrain grid mesh.
-    Vertex layout: pos(3) + uv(2) + normal(3)  → stride = 32 B
+    Closed road strip from (x, z) centre-line waypoints.
+    Each segment is first subdivided with a Catmull-Rom spline (controlled by
+    `subdivisions`) to produce smooth, rounded corners. Tangents at each dense
+    point are then averaged from adjacent sub-segments.
+    Vertex layout: pos(3)+uv(2)+normal(3), stride=32 B.
     Returns (vao, index_count).
     """
-    import math
-    n    = divs + 1
-    lin  = np.linspace(-half, half, n, dtype=np.float32)
-    X, Z = np.meshgrid(lin, lin)
-    fx   = X / half
-    fz   = Z / half
+    pts = np.array(waypoints, dtype=np.float32)   # (N, 2)
+    pts = _catmull_rom(pts, subdivisions)          # smooth subdivision
+    N   = len(pts)
 
-    H = (h_max * (
-         0.30 * np.sin(fx * math.pi * 3.0)        * np.cos(fz * math.pi * 2.5)
-       + 0.22 * np.sin(fx * math.pi * 6.5 + 1.5)  * np.sin(fz * math.pi * 5.5)
-       + 0.18 * np.cos(fx * math.pi * 11.0)        * np.cos(fz * math.pi * 9.0 + 0.7)
-       + 0.12 * np.sin(fx * math.pi * 19.0 + 0.4)  * np.sin(fz * math.pi * 17.0)
-       + 0.08 * np.cos(fx * math.pi * 30.0)        * np.cos(fz * math.pi * 28.0 + 1.2)
-       + 0.05 * np.sin(fx * math.pi * 48.0 + 0.8)  * np.sin(fz * math.pi * 45.0)
-    ))
-    H = (H - H.min()) / (H.max() - H.min() + 1e-9) * h_max
+    # Smooth tangent at each vertex
+    tangents = np.zeros((N, 2), dtype=np.float32)
+    for i in range(N):
+        d_in  = (pts[i] - pts[(i - 1) % N]).astype(np.float64)
+        d_out = (pts[(i + 1) % N] - pts[i]).astype(np.float64)
+        for d in (d_in, d_out):
+            ln = math.hypot(d[0], d[1])
+            if ln > 1e-6:
+                d /= ln
+        t  = d_in + d_out
+        ln = math.hypot(t[0], t[1])
+        tangents[i] = (t / ln if ln > 1e-6 else d_out).astype(np.float32)
 
-    # Smooth fade-to-flat near edges (avoids gaps with the skybox floor)
-    fade_start = 0.78
-    dist  = np.maximum(np.abs(fx), np.abs(fz))
-    fade  = np.clip(1.0 - (dist - fade_start) / (1.0 - fade_start), 0.0, 1.0)
-    fade  = fade ** 2
-    H    *= fade
+    # Perpendicular (right side) = clockwise rotation: (tz, -tx)
+    perps = np.stack([ tangents[:, 1], -tangents[:, 0]], axis=1)
+    left  = pts - perps * road_half_w
+    right = pts + perps * road_half_w
 
-    # Surface normals (central differences)
-    cell = 2.0 * half / (n - 1)
-    Hp   = np.pad(H, 1, mode="edge")
-    dHdx = (Hp[1:-1, 2:] - Hp[1:-1, :-2]) / (2.0 * cell)
-    dHdz = (Hp[2:,  1:-1] - Hp[:-2, 1:-1]) / (2.0 * cell)
-    Nx, Ny, Nz = -dHdx, np.ones_like(dHdx), -dHdz
-    L         = np.sqrt(Nx**2 + Ny**2 + Nz**2)
-    Nx /= L;  Ny /= L;  Nz /= L
+    verts, idxs, v_coord = [], [], 0.0
+    for i in range(N):
+        j       = (i + 1) % N
+        seg_len = math.hypot(*(pts[j] - pts[i]).tolist())
+        v_next  = v_coord + seg_len * v_tile
+        for (x, z), u, v in [
+            (left[i],  0.0, v_coord),
+            (left[j],  0.0, v_next),
+            (right[j], 1.0, v_next),
+            (right[i], 1.0, v_coord),
+        ]:
+            verts.extend([x, y_offset, z, u, v, 0.0, 1.0, 0.0])
+        base = i * 4
+        idxs.extend([base, base + 1, base + 2,  base, base + 2, base + 3])
+        v_coord = v_next
 
-    U = (fx + 1.0) * 0.5 * tile
-    V = (fz + 1.0) * 0.5 * tile
+    verts = np.array(verts, dtype=np.float32)
+    idxs  = np.array(idxs,  dtype=np.uint32)
+    return create_mesh(verts, idxs, [(0, 3, 32, 0), (1, 2, 32, 12), (2, 3, 32, 20)])
 
-    verts = np.stack([X, H, Z, U, V, Nx, Ny, Nz], axis=-1).astype(np.float32).ravel()
 
-    I, J  = np.meshgrid(np.arange(divs), np.arange(divs), indexing="ij")
-    I, J  = I.ravel(), J.ravel()
-    tl = I * n + J
-    tri1 = np.stack([tl,     tl + n,     tl + 1    ], axis=1)
-    tri2 = np.stack([tl + 1, tl + n,     tl + n + 1], axis=1)
-    idxs = np.concatenate([tri1, tri2], axis=1).ravel().astype(np.uint32)
+def build_box(w, h, d):
+    """
+    Axis-aligned textured box: width w (X), height h (Y), depth d (Z).
+    Base at y=0, centred in X and Z.
+    Vertex layout: pos(3)+uv(2)+normal(3), stride=32 B.
+    Returns (vao, index_count).
+    """
+    hw, hd = w * 0.5, d * 0.5
+    faces = [
+        ((0, 1, 0), (-hw,h,+hd), (+hw,h,+hd), (+hw,h,-hd), (-hw,h,-hd)),  # top    +Y
+        ((0,-1, 0), (-hw,0,-hd), (+hw,0,-hd), (+hw,0,+hd), (-hw,0,+hd)),  # bottom -Y
+        ((1, 0, 0), (+hw,0,+hd), (+hw,0,-hd), (+hw,h,-hd), (+hw,h,+hd)),  # right  +X
+        ((-1,0, 0), (-hw,0,-hd), (-hw,0,+hd), (-hw,h,+hd), (-hw,h,-hd)),  # left   -X
+        ((0, 0, 1), (-hw,0,+hd), (+hw,0,+hd), (+hw,h,+hd), (-hw,h,+hd)),  # front  +Z
+        ((0, 0,-1), (+hw,0,-hd), (-hw,0,-hd), (-hw,h,-hd), (+hw,h,-hd)),  # back   -Z
+    ]
+    uv_quad = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    quad    = [0, 1, 2,  0, 2, 3]
+    verts, idxs, base = [], [], 0
+    for (nx, ny, nz), *corners in faces:
+        for (px, py, pz), (u, v) in zip(corners, uv_quad):
+            verts.extend([px, py, pz, u, v, nx, ny, nz])
+        idxs.extend([base + q for q in quad])
+        base += 4
+    verts = np.array(verts, dtype=np.float32)
+    idxs  = np.array(idxs,  dtype=np.uint32)
+    return create_mesh(verts, idxs, [(0, 3, 32, 0), (1, 2, 32, 12), (2, 3, 32, 20)])
 
-    # stride=32 B: pos@0 B, uv@12 B, normal@20 B
-    attribs = [(0, 3, 32, 0), (1, 2, 32, 12), (2, 3, 32, 20)]
-    return create_mesh(verts, idxs, attribs)
+
+def build_box_solid(w, h, d):
+    """
+    Same as build_box but without UVs: pos(3)+normal(3), stride=24 B.
+    For solid-colour rendering with pyramid_prog.
+    Returns (vao, index_count).
+    """
+    hw, hd = w * 0.5, d * 0.5
+    faces = [
+        ((0, 1, 0), (-hw,h,+hd), (+hw,h,+hd), (+hw,h,-hd), (-hw,h,-hd)),
+        ((0,-1, 0), (-hw,0,-hd), (+hw,0,-hd), (+hw,0,+hd), (-hw,0,+hd)),
+        ((1, 0, 0), (+hw,0,+hd), (+hw,0,-hd), (+hw,h,-hd), (+hw,h,+hd)),
+        ((-1,0, 0), (-hw,0,-hd), (-hw,0,+hd), (-hw,h,+hd), (-hw,h,-hd)),
+        ((0, 0, 1), (-hw,0,+hd), (+hw,0,+hd), (+hw,h,+hd), (-hw,h,+hd)),
+        ((0, 0,-1), (+hw,0,-hd), (-hw,0,-hd), (-hw,h,-hd), (+hw,h,-hd)),
+    ]
+    quad = [0, 1, 2,  0, 2, 3]
+    verts, idxs, base = [], [], 0
+    for (nx, ny, nz), *corners in faces:
+        for (px, py, pz) in corners:
+            verts.extend([px, py, pz, nx, ny, nz])
+        idxs.extend([base + q for q in quad])
+        base += 4
+    verts = np.array(verts, dtype=np.float32)
+    idxs  = np.array(idxs,  dtype=np.uint32)
+    return create_mesh(verts, idxs, [(0, 3, 24, 0), (1, 3, 24, 12)])
+
+
+def build_cone(radius, height, segments=12):
+    """
+    Flat-shaded cone: base at y=0, apex at y=height.
+    Vertex layout: pos(3)+normal(3), stride=24 B.
+    Winding: apex → p1 → p0 gives outward-facing normals.
+    Returns (vao, index_count).
+    """
+    apex  = np.array([0.0, float(height), 0.0])
+    verts = []
+    for i in range(segments):
+        a0 = 2.0 * math.pi * i       / segments
+        a1 = 2.0 * math.pi * (i + 1) / segments
+        p0 = np.array([radius * math.cos(a0), 0.0, radius * math.sin(a0)])
+        p1 = np.array([radius * math.cos(a1), 0.0, radius * math.sin(a1)])
+        raw = np.cross(p1 - apex, p0 - apex)
+        ln  = np.linalg.norm(raw)
+        n   = (raw / ln).astype(np.float32) if ln > 1e-9 else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        for pt in (apex, p1, p0):
+            verts.extend([*(pt.astype(np.float32)), *n])
+    verts = np.array(verts, dtype=np.float32)
+    idxs  = np.arange(segments * 3, dtype=np.uint32)
+    return create_mesh(verts, idxs, [(0, 3, 24, 0), (1, 3, 24, 12)])

@@ -93,3 +93,48 @@ def make_terrain_tex(size=512):
     b = np.clip(18  + t * 25, 0, 255).astype(np.uint8)
     img = Image.fromarray(np.stack([r, g, b], axis=-1), "RGB")
     return img.filter(ImageFilter.GaussianBlur(0.6))
+
+
+def make_road_tex(size=512):
+    """Dark asphalt with sine-noise grain and a dashed centre-line."""
+    n = _noise2d(size, [2.0, 5.0, 12.0], [0.55, 0.30, 0.15], phase_seed=17)
+    t = (n + 1.0) * 0.5
+    r = np.clip(38 + t * 18, 0, 255).astype(np.uint8)
+    g = np.clip(38 + t * 18, 0, 255).astype(np.uint8)
+    b = np.clip(44 + t * 18, 0, 255).astype(np.uint8)
+    img  = Image.fromarray(np.stack([r, g, b], axis=-1), "RGB")
+    draw = ImageDraw.Draw(img)
+    # Dashed centre line
+    cx = size // 2
+    dash, gap = size // 8, size // 16
+    y = 0
+    while y < size:
+        draw.rectangle([(cx - 4, y), (cx + 4, y + dash)], fill=(210, 210, 210))
+        y += dash + gap
+    # Edge lines
+    for ex in [size // 9, size - size // 9]:
+        draw.rectangle([(ex - 3, 0), (ex + 3, size - 1)], fill=(220, 215, 160))
+    return img.filter(ImageFilter.GaussianBlur(0.6))
+
+
+def make_building_tex(size=512):
+    """Concrete facade with a grid of windows."""
+    n = _noise2d(size, [3.0, 8.0], [0.70, 0.30], phase_seed=55)
+    t = (n + 1.0) * 0.5
+    r = np.clip(155 + t * 35, 0, 255).astype(np.uint8)
+    g = np.clip(153 + t * 32, 0, 255).astype(np.uint8)
+    b = np.clip(148 + t * 28, 0, 255).astype(np.uint8)
+    img  = Image.fromarray(np.stack([r, g, b], axis=-1), "RGB")
+    draw = ImageDraw.Draw(img)
+    cols, rows = 5, 4
+    mx, my = size // 10, size // 8
+    cw = (size - 2 * mx) // cols
+    ch = (size - 2 * my) // rows
+    pad = max(cw // 5, 4)
+    for row in range(rows):
+        for col in range(cols):
+            x0 = mx + col * cw + pad
+            y0 = my + row * ch + pad
+            draw.rectangle([(x0, y0), (x0 + cw - 2*pad, y0 + ch - 2*pad)],
+                           fill=(75, 98, 128))
+    return img.filter(ImageFilter.GaussianBlur(0.5))

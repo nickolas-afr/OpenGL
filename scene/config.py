@@ -12,7 +12,7 @@ SKY_D = 300.0   # z half-extent  (±300)
 # Terrain
 TERRAIN_HALF   = 240.0  # half-extent of the terrain grid (< SKY_W / SKY_D)
 TERRAIN_DIVS   = 100    # grid subdivisions (100×100 quads)
-TERRAIN_HEIGHT = 0.0    # max hill elevation; set to 0 for a flat ground plane
+TERRAIN_HEIGHT = 2.0    # max hill elevation; set to 0 for a flat ground plane
 TERRAIN_TILE   = 32.0   # texture tile repetitions across terrain surface
 
 # Pyramid
@@ -36,7 +36,7 @@ AMBIENT   = 0.32
 
 # Circuit  ─────────────────────────────────────────────────────────────────
 CIRCUIT_ROAD_HALF_W = 7.0    # metres either side of centreline
-CIRCUIT_Y           = 0.05   # slight lift to avoid z-fighting with terrain
+CIRCUIT_Y           = 0.80  # must exceed worst-case bilinear-vs-triangle mismatch
 
 # 21 centreline waypoints (x, z); closure is handled in build_circuit()
 CIRCUIT_WAYPOINTS = [

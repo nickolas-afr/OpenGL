@@ -9,7 +9,7 @@ import scene.shaders as shaders
 from core.gl_utils   import link_program, upload_texture, set_mat4
 from core.math_utils import mat_perspective, mat_translate
 from scene.textures  import make_grass_tex, make_sky_top_tex, make_horizon_tex, make_terrain_tex, make_road_tex, make_building_tex
-from scene.geometry  import build_skybox, build_terrain, build_pyramid, build_circuit, build_box, build_box_solid, build_cone
+from scene.geometry  import build_skybox, build_terrain, build_pyramid, build_circuit, build_box, build_box_solid, build_cone, make_height_grid, TerrainSampler
 from scene.camera    import Camera
 
 
@@ -73,10 +73,14 @@ def run():
     sky_faces        = build_skybox(config.SKY_W, config.SKY_H, config.SKY_D)
     ter_vao, ter_cnt = build_terrain(config.TERRAIN_HALF, config.TERRAIN_DIVS,
                                      config.TERRAIN_HEIGHT, config.TERRAIN_TILE)
+    H_grid, _        = make_height_grid(config.TERRAIN_HALF, config.TERRAIN_DIVS,
+                                        config.TERRAIN_HEIGHT)
+    terrain_sampler  = TerrainSampler(H_grid, config.TERRAIN_HALF)
     pyr_vao, pyr_cnt = build_pyramid(config.PYRAMID_BASE_HALF, config.PYRAMID_HEIGHT)
     cir_vao,  cir_cnt  = build_circuit(config.CIRCUIT_WAYPOINTS,
                                         config.CIRCUIT_ROAD_HALF_W,
-                                        config.CIRCUIT_Y)
+                                        config.CIRCUIT_Y,
+                                        height_sampler=terrain_sampler)
     building_vaos = [build_box(bw, bh, bd)
                      for _, _, bw, bh, bd in config.BUILDINGS]
     trunk_vao,  trunk_cnt  = build_box_solid(1.5, config.TRUNK_H,  1.5)
@@ -157,7 +161,8 @@ def run():
         # Pass 4: Buildings (terrain shader, building texture)
         glBindTexture(GL_TEXTURE_2D, tex_building)
         for (bx, bz, bw, bh, bd), (bvao, bcnt) in zip(config.BUILDINGS, building_vaos):
-            model   = mat_translate(bx, 0.0, bz)
+            by      = terrain_sampler(bx, bz)
+            model   = mat_translate(bx, by, bz)
             mvp_obj = proj @ view @ model
             set_mat4(terrain_prog, "uMVP",   mvp_obj)
             set_mat4(terrain_prog, "uModel", model)
@@ -170,15 +175,16 @@ def run():
         glUniform3fv(glGetUniformLocation(pyramid_prog, "uSunColor"), 1, config.SUN_COLOR)
         glUniform1f (glGetUniformLocation(pyramid_prog, "uAmbient"),  config.AMBIENT)
         for tx, tz in config.TREE_POSITIONS:
+            ty = terrain_sampler(tx, tz)
             # Trunk
-            model_t = mat_translate(tx, 0.0, tz)
+            model_t = mat_translate(tx, ty, tz)
             set_mat4(pyramid_prog, "uMVP",   proj @ view @ model_t)
             set_mat4(pyramid_prog, "uModel", model_t)
             glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.TRUNK_COLOR)
             glBindVertexArray(trunk_vao)
             glDrawElements(GL_TRIANGLES, trunk_cnt, GL_UNSIGNED_INT, None)
             # Canopy sits on top of trunk
-            model_c = mat_translate(tx, config.TRUNK_H, tz)
+            model_c = mat_translate(tx, ty + config.TRUNK_H, tz)
             set_mat4(pyramid_prog, "uMVP",   proj @ view @ model_c)
             set_mat4(pyramid_prog, "uModel", model_c)
             glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.CANOPY_COLOR)

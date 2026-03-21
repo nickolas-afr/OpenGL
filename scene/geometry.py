@@ -10,29 +10,47 @@ _SKY_ATTRIBS = [(0, 3, 20, 0), (1, 2, 20, 12)]   # pos(3) + uv(2), stride=20 B
 
 def _catmull_rom(pts, subdivisions=8):
     """
-    Subdivide a closed (x,z) polyline using Catmull-Rom splines.
-    Each original segment is replaced by `subdivisions` smooth samples.
-    Returns a (N*subdivisions, 2) float32 array that passes through every
-    original waypoint and produces smooth arcs through corners.
+    Centripetal Catmull-Rom subdivision (α=0.5) using the Barry-Goldman algorithm.
+    Unlike uniform parameterisation, centripetal CR is mathematically guaranteed
+    to produce no cusps or self-intersections at sharp or unequally-spaced corners.
+    Returns a (N*subdivisions, 2) float32 array passing through every waypoint.
     """
     N   = len(pts)
     out = []
+
+    def _knot(a, b):
+        return math.hypot(b[0] - a[0], b[1] - a[1]) ** 0.5   # α = 0.5
+
+    def _lerp(ta, tb, t, a, b):
+        if abs(tb - ta) < 1e-12:
+            return (a + b) * 0.5
+        return (tb - t) / (tb - ta) * a + (t - ta) / (tb - ta) * b
+
     for i in range(N):
         p0 = pts[(i - 1) % N].astype(np.float64)
         p1 = pts[i].astype(np.float64)
         p2 = pts[(i + 1) % N].astype(np.float64)
         p3 = pts[(i + 2) % N].astype(np.float64)
+
+        t0 = 0.0
+        t1 = t0 + _knot(p0, p1)
+        t2 = t1 + _knot(p1, p2)
+        t3 = t2 + _knot(p2, p3)
+
+        if t2 - t1 < 1e-9:          # degenerate zero-length segment
+            out.extend([p1] * subdivisions)
+            continue
+
         for k in range(subdivisions):
-            t  = k / subdivisions
-            t2 = t * t
-            t3 = t2 * t
-            q  = 0.5 * (
-                2.0 * p1
-                + (-p0 + p2)              * t
-                + (2*p0 - 5*p1 + 4*p2 - p3) * t2
-                + (-p0 + 3*p1 - 3*p2 + p3)  * t3
-            )
-            out.append(q)
+            t  = t1 + (t2 - t1) * k / subdivisions
+            # Barry-Goldman recursive evaluation
+            A1 = _lerp(t0, t1, t, p0, p1)
+            A2 = _lerp(t1, t2, t, p1, p2)
+            A3 = _lerp(t2, t3, t, p2, p3)
+            B1 = _lerp(t0, t2, t, A1, A2)
+            B2 = _lerp(t1, t3, t, A2, A3)
+            out.append(_lerp(t1, t2, t, B1, B2))
+
     return np.array(out, dtype=np.float32)
 
 
@@ -73,11 +91,12 @@ def build_skybox(W, H, D, floor_tile=25.0):
     return [create_mesh(f, _QUAD_IDX, _SKY_ATTRIBS) for f in faces]
 
 
-def build_terrain(half, divs, h_max, tile):
+def make_height_grid(half, divs, h_max):
     """
-    Generate a terrain grid mesh.
-    Vertex layout: pos(3) + uv(2) + normal(3) → stride = 32 B
-    Returns (vao, index_count).
+    Compute the terrain height grid used by build_terrain.
+    Returns a (divs+1, divs+1) float32 array H where H[row, col] is the
+    elevation at world position (x=lin[col], z=lin[row]).
+    Also returns the 1-D coordinate array lin = linspace(-half, half, divs+1).
     """
     n    = divs + 1
     lin  = np.linspace(-half, half, n, dtype=np.float32)
@@ -95,14 +114,58 @@ def build_terrain(half, divs, h_max, tile):
            + 0.05 * np.sin(fx * math.pi * 48.0 + 0.8)  * np.sin(fz * math.pi * 45.0)
         ))
         H = (H - H.min()) / (H.max() - H.min() + 1e-9) * h_max
-
-        # Smooth fade-to-flat near edges (avoids gaps with the skybox floor)
         fade_start = 0.78
         dist  = np.maximum(np.abs(fx), np.abs(fz))
         fade  = np.clip(1.0 - (dist - fade_start) / (1.0 - fade_start), 0.0, 1.0)
         H    *= fade ** 2
     else:
         H = np.zeros_like(X)
+
+    return H.astype(np.float32), lin
+
+
+class TerrainSampler:
+    """
+    Bilinear interpolator for the terrain height grid.
+    Call sampler(x, z) to get the terrain elevation at any world position.
+    Points outside the grid are clamped to the grid edge.
+    """
+    def __init__(self, H, half):
+        self.H    = H
+        self.half = float(half)
+        self.n    = H.shape[0]
+
+    def __call__(self, x, z):
+        n    = self.n
+        half = self.half
+        # Map world coords to fractional grid indices
+        # H[row, col] → row = z axis, col = x axis
+        col_f = (float(x) + half) / (2.0 * half) * (n - 1)
+        row_f = (float(z) + half) / (2.0 * half) * (n - 1)
+        col0  = int(max(0, min(n - 2, col_f)))
+        row0  = int(max(0, min(n - 2, row_f)))
+        tc    = col_f - col0
+        tr    = row_f - row0
+        H     = self.H
+        return float(
+            H[row0,   col0  ] * (1 - tr) * (1 - tc)
+          + H[row0,   col0+1] * (1 - tr) * tc
+          + H[row0+1, col0  ] * tr       * (1 - tc)
+          + H[row0+1, col0+1] * tr       * tc
+        )
+
+
+def build_terrain(half, divs, h_max, tile):
+    """
+    Generate a terrain grid mesh.
+    Vertex layout: pos(3) + uv(2) + normal(3) → stride = 32 B
+    Returns (vao, index_count).
+    """
+    H, lin = make_height_grid(half, divs, h_max)
+    n      = len(lin)
+    X, Z   = np.meshgrid(lin, lin)
+    fx     = X / half
+    fz     = Z / half
 
     # Surface normals via central differences (flat terrain → all (0,1,0))
     cell = 2.0 * half / (n - 1)
@@ -118,7 +181,7 @@ def build_terrain(half, divs, h_max, tile):
 
     verts = np.stack([X, H, Z, U, V, Nx, Ny, Nz], axis=-1).astype(np.float32).ravel()
 
-    I, J  = np.meshgrid(np.arange(divs), np.arange(divs), indexing="ij")
+    I, J  = np.meshgrid(np.arange(n - 1), np.arange(n - 1), indexing="ij")
     I, J  = I.ravel(), J.ravel()
     tl = I * n + J
     tri1 = np.stack([tl,     tl + n,     tl + 1    ], axis=1)
@@ -169,12 +232,13 @@ def build_pyramid(base_half, height):
     return create_mesh(verts, idxs, attribs)
 
 
-def build_circuit(waypoints, road_half_w, y_offset=0.05, v_tile=0.04, subdivisions=8):
+def build_circuit(waypoints, road_half_w, y_offset=0.05, v_tile=0.04,
+                  subdivisions=8, height_sampler=None):
     """
     Closed road strip from (x, z) centre-line waypoints.
-    Each segment is first subdivided with a Catmull-Rom spline (controlled by
-    `subdivisions`) to produce smooth, rounded corners. Tangents at each dense
-    point are then averaged from adjacent sub-segments.
+    Each segment is subdivided with a Catmull-Rom spline for smooth corners.
+    If height_sampler is provided (a TerrainSampler), each vertex y is set to
+    sampler(x, z) + y_offset so the road conforms to the terrain.
     Vertex layout: pos(3)+uv(2)+normal(3), stride=32 B.
     Returns (vao, index_count).
     """
@@ -200,20 +264,61 @@ def build_circuit(waypoints, road_half_w, y_offset=0.05, v_tile=0.04, subdivisio
     left  = pts - perps * road_half_w
     right = pts + perps * road_half_w
 
-    verts, idxs, v_coord = [], [], 0.0
+    verts, idxs, v_coord, vc = [], [], 0.0, 0
+
+    _SKIRT_DEPTH = 1.2   # how far below the sampled terrain the skirt extends
+
+    def _ht(xy):
+        return height_sampler(float(xy[0]), float(xy[1])) if height_sampler else 0.0
+
     for i in range(N):
         j       = (i + 1) % N
         seg_len = math.hypot(*(pts[j] - pts[i]).tolist())
         v_next  = v_coord + seg_len * v_tile
-        for (x, z), u, v in [
-            (left[i],  0.0, v_coord),
-            (left[j],  0.0, v_next),
-            (right[j], 1.0, v_next),
-            (right[i], 1.0, v_coord),
+
+        h_li = _ht(left[i]);  h_lj = _ht(left[j])
+        h_ri = _ht(right[i]); h_rj = _ht(right[j])
+
+        # ── TOP SURFACE ─────────────────────────────────────────────────────
+        # vertex order: left_i, left_j, right_j, right_i  → normal UP (0,1,0)
+        for (x, z), h, u, v in [
+            (left[i],  h_li, 0.0, v_coord),
+            (left[j],  h_lj, 0.0, v_next),
+            (right[j], h_rj, 1.0, v_next),
+            (right[i], h_ri, 1.0, v_coord),
         ]:
-            verts.extend([x, y_offset, z, u, v, 0.0, 1.0, 0.0])
-        base = i * 4
-        idxs.extend([base, base + 1, base + 2,  base, base + 2, base + 3])
+            verts.extend([x, h + y_offset, z, u, v, 0.0, 1.0, 0.0])
+        idxs.extend([vc, vc+1, vc+2,  vc, vc+2, vc+3]);  vc += 4
+
+        # Outward normals for skirts (horizontal, perpendicular to road direction)
+        px, pz = float(perps[i][0]), float(perps[i][1])
+        plen   = math.hypot(px, pz)
+        if plen > 1e-6: px, pz = px / plen, pz / plen
+
+        # ── LEFT SKIRT ──────────────────────────────────────────────────────
+        # Normal points LEFT (−perp).  CCW from outside: top_i, top_j, bot_j, bot_i
+        nx_l, nz_l = -px, -pz
+        for (x, z), y_val, u, v in [
+            (left[i], h_li + y_offset,    0.0, v_coord),   # top_i
+            (left[j], h_lj + y_offset,    0.0, v_next),    # top_j
+            (left[j], h_lj - _SKIRT_DEPTH, 1.0, v_next),   # bot_j
+            (left[i], h_li - _SKIRT_DEPTH, 1.0, v_coord),  # bot_i
+        ]:
+            verts.extend([x, y_val, z, u, v, nx_l, 0.0, nz_l])
+        idxs.extend([vc, vc+1, vc+2,  vc, vc+2, vc+3]);  vc += 4
+
+        # ── RIGHT SKIRT ─────────────────────────────────────────────────────
+        # Normal points RIGHT (+perp).  CCW from outside: top_i, bot_i, bot_j, top_j
+        nx_r, nz_r = px, pz
+        for (x, z), y_val, u, v in [
+            (right[i], h_ri + y_offset,    0.0, v_coord),   # top_i
+            (right[i], h_ri - _SKIRT_DEPTH, 1.0, v_coord),  # bot_i
+            (right[j], h_rj - _SKIRT_DEPTH, 1.0, v_next),   # bot_j
+            (right[j], h_rj + y_offset,    0.0, v_next),    # top_j
+        ]:
+            verts.extend([x, y_val, z, u, v, nx_r, 0.0, nz_r])
+        idxs.extend([vc, vc+1, vc+2,  vc, vc+2, vc+3]);  vc += 4
+
         v_coord = v_next
 
     verts = np.array(verts, dtype=np.float32)

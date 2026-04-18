@@ -21,6 +21,19 @@ def mat_translate(x, y, z):
     return m
 
 
+def mat_ortho(left, right, bottom, top, near, far):
+    """Row-major 4×4 orthographic projection matrix (same convention as mat_perspective)."""
+    rl = right - left
+    tb = top - bottom
+    fn = far - near
+    return np.array([
+        [2.0/rl, 0,       0,        -(right+left)/rl],
+        [0,      2.0/tb,  0,        -(top+bottom)/tb],
+        [0,      0,      -2.0/fn,   -(far+near)/fn  ],
+        [0,      0,       0,         1.0             ],
+    ], dtype=np.float32)
+
+
 def mat_scale(sx, sy, sz):
     """Row-major 4×4 scale matrix."""
     m = np.eye(4, dtype=np.float32)

@@ -12,7 +12,7 @@ SKY_D = 300.0   # z half-extent  (±300)
 # Terrain
 TERRAIN_HALF   = 240.0  # half-extent of the terrain grid (< SKY_W / SKY_D)
 TERRAIN_DIVS   = 100    # grid subdivisions (100×100 quads)
-TERRAIN_HEIGHT = 2.0    # max hill elevation; set to 0 for a flat ground plane
+TERRAIN_HEIGHT = 3.0    # max hill elevation; set to 0 for a flat ground plane
 TERRAIN_TILE   = 32.0   # texture tile repetitions across terrain surface
 
 # Pyramid
@@ -70,3 +70,25 @@ BUILDINGS = [
     (-106,  10, 46, 10,  8),   # grandstand B (left side, clear of road edge at x=-75)
 ]
 BUILDING_COLOR = np.array([0.75, 0.73, 0.70], dtype=np.float32)
+
+# Shadow mapping
+SHADOW_MAP_SIZE = 2048
+
+# Lighting poles — (x, z) placed outside the circuit perimeter (road edge ≈ ±7 from centreline)
+POLE_POSITIONS = [
+    # Right straight (centreline x≈65, road edge x≈72)
+    ( 80, -90), ( 80, -50), ( 80, -10), ( 80,  30), ( 80,  65),
+    # Top hairpin / curve
+    ( 55,  115), (  0,  132),
+    # Left straight (centreline x≈-68, road edge x≈-75)
+    (-83,  55), (-83,  10), (-83, -35), (-83, -75),
+    # Bottom curve
+    (-45, -125), ( 10, -133), ( 45, -120),
+]
+POLE_HEIGHT = 7.0
+POLE_COLOR  = np.array([0.25, 0.25, 0.28], dtype=np.float32)  # dark steel
+LAMP_COLOR  = np.array([0.95, 0.90, 0.72], dtype=np.float32)  # warm white
+
+# Emitted light from each lamp head (additive, no per-pole shadow map)
+POLE_LIGHT_COLOR     = np.array([1.0, 0.88, 0.55], dtype=np.float32)  # sodium yellow
+POLE_LIGHT_INTENSITY = 2.5

@@ -34,6 +34,35 @@ def mat_ortho(left, right, bottom, top, near, far):
     ], dtype=np.float32)
 
 
+def mat_rotate_x(angle_rad):
+    """Row-major 4×4 rotation around the X axis.
+    At angle=+π/2, local +Y maps to world +Z (tips the object forward).
+    """
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [1, 0,  0, 0],
+        [0, c, -s, 0],
+        [0, s,  c, 0],
+        [0, 0,  0, 1],
+    ], dtype=np.float32)
+
+
+def mat_rotate_y(angle_rad):
+    """Row-major 4×4 rotation matrix around the Y axis.
+    At angle=0, local +Z maps to world +Z (identity).
+    R_y(θ) * [0,0,1,1]ᵀ = [sin θ, 0, cos θ, 1]ᵀ.
+    """
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [ c, 0, s, 0],
+        [ 0, 1, 0, 0],
+        [-s, 0, c, 0],
+        [ 0, 0, 0, 1],
+    ], dtype=np.float32)
+
+
 def mat_scale(sx, sy, sz):
     """Row-major 4×4 scale matrix."""
     m = np.eye(4, dtype=np.float32)

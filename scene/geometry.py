@@ -124,6 +124,34 @@ def make_height_grid(half, divs, h_max):
     return H.astype(np.float32), lin
 
 
+class RoadAwareSampler:
+    """
+    Wraps a TerrainSampler and adds circuit_y to the result whenever the
+    query point lies within road_half_w of the circuit centreline.
+    Pass this to Car (and Pedestrian) so they sit on the road surface.
+    """
+    def __init__(self, terrain_sampler, circuit_path, road_half_w, circuit_y):
+        self._terrain = terrain_sampler
+        self._cy      = float(circuit_y)
+        self._r2      = float(road_half_w) ** 2
+        p             = circuit_path.astype(np.float64)          # (N, 2)
+        pn            = np.roll(p, -1, axis=0)                   # next points
+        d             = pn - p
+        self._seg_len2 = np.maximum((d * d).sum(axis=1), 1e-12)
+        self._pi = p
+        self._d  = d
+
+    def __call__(self, x, z):
+        ty  = self._terrain(x, z)
+        tx  = x - self._pi[:, 0]
+        tz  = z - self._pi[:, 1]
+        t   = np.clip((tx * self._d[:, 0] + tz * self._d[:, 1]) / self._seg_len2, 0.0, 1.0)
+        nx  = self._pi[:, 0] + t * self._d[:, 0]
+        nz  = self._pi[:, 1] + t * self._d[:, 1]
+        d2  = (x - nx) ** 2 + (z - nz) ** 2
+        return ty + self._cy if d2.min() < self._r2 else ty
+
+
 class TerrainSampler:
     """
     Bilinear interpolator for the terrain height grid.
@@ -377,6 +405,55 @@ def build_box_solid(w, h, d):
             verts.extend([px, py, pz, nx, ny, nz])
         idxs.extend([base + q for q in quad])
         base += 4
+    verts = np.array(verts, dtype=np.float32)
+    idxs  = np.array(idxs,  dtype=np.uint32)
+    return create_mesh(verts, idxs, [(0, 3, 24, 0), (1, 3, 24, 12)])
+
+
+def get_circuit_path(waypoints, subdivisions=8):
+    """Returns the smoothed circuit centreline as an (N, 2) float32 array (x, z columns)."""
+    pts = np.array(waypoints, dtype=np.float32)
+    return _catmull_rom(pts, subdivisions)
+
+
+def build_wheel_solid(radius, thickness, segments=12):
+    """
+    Flat disc (wheel) centred at origin, axis along local X.
+    Spans x ∈ [−thickness/2, +thickness/2], radius r in the YZ plane.
+    Vertex layout: pos(3)+normal(3), stride=24 B.
+    Returns (vao, index_count).
+    """
+    hw    = thickness * 0.5
+    verts = []
+    idxs  = []
+    base  = 0
+
+    for i in range(segments):
+        a0 = 2.0 * math.pi * i       / segments
+        a1 = 2.0 * math.pi * (i + 1) / segments
+        y0, z0 = radius * math.cos(a0), radius * math.sin(a0)
+        y1, z1 = radius * math.cos(a1), radius * math.sin(a1)
+        am      = (a0 + a1) * 0.5
+        ny, nz  = math.cos(am), math.sin(am)   # outward side normal
+
+        # Side quad: A=(-hw,y0,z0) B=(-hw,y1,z1) C=(+hw,y1,z1) D=(+hw,y0,z0)
+        for pt in [(-hw, y0, z0), (-hw, y1, z1), (hw, y1, z1), (hw, y0, z0)]:
+            verts.extend([*pt, 0.0, ny, nz])
+        idxs.extend([base, base+1, base+2,  base, base+2, base+3])
+        base += 4
+
+        # Left end-cap (x=-hw, normal=-X): centre → rim[i+1] → rim[i]
+        for pt in [(-hw, 0.0, 0.0), (-hw, y1, z1), (-hw, y0, z0)]:
+            verts.extend([*pt, -1.0, 0.0, 0.0])
+        idxs.extend([base, base+1, base+2])
+        base += 3
+
+        # Right end-cap (x=+hw, normal=+X): centre → rim[i] → rim[i+1]
+        for pt in [(hw, 0.0, 0.0), (hw, y0, z0), (hw, y1, z1)]:
+            verts.extend([*pt, 1.0, 0.0, 0.0])
+        idxs.extend([base, base+1, base+2])
+        base += 3
+
     verts = np.array(verts, dtype=np.float32)
     idxs  = np.array(idxs,  dtype=np.uint32)
     return create_mesh(verts, idxs, [(0, 3, 24, 0), (1, 3, 24, 12)])

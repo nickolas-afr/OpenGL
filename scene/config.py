@@ -12,7 +12,7 @@ SKY_D = 300.0   # z half-extent  (±300)
 # Terrain
 TERRAIN_HALF   = 240.0  # half-extent of the terrain grid (< SKY_W / SKY_D)
 TERRAIN_DIVS   = 100    # grid subdivisions (100×100 quads)
-TERRAIN_HEIGHT = 3.0    # max hill elevation; set to 0 for a flat ground plane
+TERRAIN_HEIGHT = 0.0    # max hill elevation; set to 0 for a flat ground plane
 TERRAIN_TILE   = 32.0   # texture tile repetitions across terrain surface
 
 # Pyramid
@@ -36,7 +36,7 @@ AMBIENT   = 0.32
 
 # Circuit  ─────────────────────────────────────────────────────────────────
 CIRCUIT_ROAD_HALF_W = 7.0    # metres either side of centreline
-CIRCUIT_Y           = 0.80  # must exceed worst-case bilinear-vs-triangle mismatch
+CIRCUIT_Y           = 0.10  # must exceed worst-case bilinear-vs-triangle mismatch
 
 # 21 centreline waypoints (x, z); closure is handled in build_circuit()
 CIRCUIT_WAYPOINTS = [
@@ -92,3 +92,28 @@ LAMP_COLOR  = np.array([0.95, 0.90, 0.72], dtype=np.float32)  # warm white
 # Emitted light from each lamp head (additive, no per-pole shadow map)
 POLE_LIGHT_COLOR     = np.array([1.0, 0.88, 0.55], dtype=np.float32)  # sodium yellow
 POLE_LIGHT_INTENSITY = 2.5
+
+# ── Dynamic entities  ──────────────────────────────────────────────────────
+# Car — spawns at the start of the right straight, facing +Z (toward circuit)
+CAR_START_X   =  65.0
+CAR_START_Z   = -80.0
+CAR_START_YAW =   0.0
+CAR_COLOR_BODY = np.array([0.85, 0.10, 0.10], dtype=np.float32)  # red body
+CAR_COLOR_CAB  = np.array([0.60, 0.06, 0.06], dtype=np.float32)  # dark-red cab
+
+# Birds — number to spawn; all use a single colour
+NUM_BIRDS  = 6
+BIRD_COLOR = np.array([0.15, 0.15, 0.20], dtype=np.float32)
+
+# Pedestrians — one colour per pedestrian + a shared skin tone for heads
+NUM_PEDESTRIANS = 5
+PEDESTRIAN_COLORS = [
+    np.array([0.70, 0.50, 0.30], dtype=np.float32),  # tan jacket
+    np.array([0.20, 0.40, 0.65], dtype=np.float32),  # blue jacket
+    np.array([0.55, 0.25, 0.25], dtype=np.float32),  # red jacket
+    np.array([0.30, 0.55, 0.30], dtype=np.float32),  # green jacket
+    np.array([0.50, 0.50, 0.52], dtype=np.float32),  # grey jacket
+]
+PED_HEAD_COLOR   = np.array([0.85, 0.70, 0.55], dtype=np.float32)
+PED_PANTS_COLOR  = np.array([0.20, 0.22, 0.35], dtype=np.float32)
+CAR_WHEEL_COLOR  = np.array([0.14, 0.14, 0.17], dtype=np.float32)

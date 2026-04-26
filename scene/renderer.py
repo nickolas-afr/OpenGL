@@ -9,8 +9,9 @@ import scene.shaders as shaders
 from core.gl_utils   import link_program, upload_texture, set_mat4
 from core.math_utils import mat_perspective, mat_translate, mat_ortho, mat_look_at
 from scene.textures  import make_grass_tex, make_sky_top_tex, make_horizon_tex, make_terrain_tex, make_road_tex, make_building_tex
-from scene.geometry  import build_skybox, build_terrain, build_pyramid, build_circuit, build_box, build_box_solid, build_cone, make_height_grid, TerrainSampler
+from scene.geometry  import build_skybox, build_terrain, build_pyramid, build_circuit, build_box, build_box_solid, build_cone, build_wheel_solid, make_height_grid, TerrainSampler, RoadAwareSampler, get_circuit_path
 from scene.camera    import Camera
+from scene.entities  import Car, Bird, Pedestrian
 
 
 def run():
@@ -32,20 +33,25 @@ def run():
     glfw.swap_interval(1)
     glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_DISABLED)
 
-    cam     = Camera(config.CAM_START, config.CAM_YAW, config.CAM_PITCH)
-    mx, my  = [config.WIN_W / 2.0], [config.WIN_H / 2.0]
-    first_m = [True]
+    cam        = Camera(config.CAM_START, config.CAM_YAW, config.CAM_PITCH)
+    mx, my     = [config.WIN_W / 2.0], [config.WIN_H / 2.0]
+    first_m    = [True]
+    follow_cam = [False]   # True = lock camera behind car
 
     def on_mouse(_, xpos, ypos):
         if first_m[0]:
             mx[0], my[0] = xpos, ypos
             first_m[0]   = False
-        cam.on_mouse(xpos - mx[0], ypos - my[0])
+            return
+        if not follow_cam[0]:
+            cam.on_mouse(xpos - mx[0], ypos - my[0])
         mx[0], my[0] = xpos, ypos
 
     def on_key(window, key, _sc, action, _mods):
         if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
             glfw.set_window_should_close(window, True)
+        if key == glfw.KEY_C and action == glfw.PRESS:
+            follow_cam[0] = not follow_cam[0]
 
     glfw.set_cursor_pos_callback(win, on_mouse)
     glfw.set_key_callback(win, on_key)
@@ -88,6 +94,39 @@ def run():
     canopy_vao, canopy_cnt = build_cone(config.CANOPY_R, config.CANOPY_H, 12)
     pole_shaft_vao, pole_shaft_cnt = build_box_solid(0.4, config.POLE_HEIGHT, 0.4)
     pole_lamp_vao,  pole_lamp_cnt  = build_box_solid(1.2, 0.5, 0.5)
+    car_body_vao,   car_body_cnt   = build_box_solid(Car.BODY_W, Car.BODY_H, Car.BODY_D)
+    car_cab_vao,    car_cab_cnt    = build_box_solid(Car.CAB_W,  Car.CAB_H,  Car.CAB_D)
+    wheel_vao,      wheel_cnt      = build_wheel_solid(Car.WHEEL_RADIUS, Car.WHEEL_T)
+    bird_body_vao,  bird_body_cnt  = build_box_solid(Bird.BODY_W, Bird.BODY_H, Bird.BODY_D)
+    bird_wing_vao,  bird_wing_cnt  = build_box_solid(Bird.WING_W, Bird.WING_H, Bird.WING_D)
+    ped_leg_vao,    ped_leg_cnt    = build_box_solid(Pedestrian.LEG_W,   Pedestrian.LEG_H,   Pedestrian.LEG_D)
+    ped_torso_vao,  ped_torso_cnt  = build_box_solid(Pedestrian.TORSO_W, Pedestrian.TORSO_H, Pedestrian.TORSO_D)
+    ped_arm_vao,    ped_arm_cnt    = build_box_solid(Pedestrian.ARM_W,   Pedestrian.ARM_H,   Pedestrian.ARM_D)
+    ped_head_vao,   ped_head_cnt   = build_box_solid(Pedestrian.HEAD_SIZE, Pedestrian.HEAD_SIZE, Pedestrian.HEAD_SIZE)
+
+    # ── Entity initialisation ─────────────────────────────────────────────
+    rng          = np.random.default_rng(42)
+    circuit_path = get_circuit_path(config.CIRCUIT_WAYPOINTS)
+    N_path       = len(circuit_path)
+    road_sampler = RoadAwareSampler(terrain_sampler, circuit_path,
+                                    config.CIRCUIT_ROAD_HALF_W, config.CIRCUIT_Y)
+
+    car = Car(config.CAR_START_X, config.CAR_START_Z, config.CAR_START_YAW,
+              road_sampler)
+    birds = [
+        Bird(float(rng.uniform(-180, 180)),
+             float(rng.uniform(20, 50)),
+             float(rng.uniform(-180, 180)),
+             rng)
+        for _ in range(config.NUM_BIRDS)
+    ]
+    pedestrians = [
+        Pedestrian(circuit_path, 0 * N_path // 5,  0.60, -4.5, road_sampler),
+        Pedestrian(circuit_path, 1 * N_path // 5,  0.50,  4.5, road_sampler),
+        Pedestrian(circuit_path, 2 * N_path // 5,  0.65, -4.5, road_sampler),
+        Pedestrian(circuit_path, 3 * N_path // 5, -0.45,  4.5, road_sampler),
+        Pedestrian(circuit_path, 4 * N_path // 5,  0.55, -3.0, road_sampler),
+    ]
 
     fw, fh = glfw.get_framebuffer_size(win)
     glViewport(0, 0, fw, fh)
@@ -130,7 +169,26 @@ def run():
     num_poles = len(config.POLE_POSITIONS)
 
     print(f"Entering render loop  |  OpenGL {glGetString(GL_VERSION).decode()}")
-    print("WASD + Mouse to navigate  |  SPACE / SHIFT = up / down  |  ESC = quit")
+    print("WASD + Mouse = free camera  |  SPACE / SHIFT = up / down  |  ESC = quit")
+    print("Arrow keys = drive car  |  C = toggle follow-car camera")
+
+    def _check_collision(cx, cz, cr):
+        """Return True if a circle (cx, cz, cr) overlaps any static obstacle."""
+        for bx, bz, bw, _bh, bd in config.BUILDINGS:
+            hw, hd = bw * 0.5, bd * 0.5
+            nx = max(bx - hw, min(bx + hw, cx))
+            nz = max(bz - hd, min(bz + hd, cz))
+            if (cx - nx) ** 2 + (cz - nz) ** 2 < cr * cr:
+                return True
+        tree_r = 1.5
+        for tx, tz in config.TREE_POSITIONS:
+            if (cx - tx) ** 2 + (cz - tz) ** 2 < (cr + tree_r) ** 2:
+                return True
+        pole_r = 0.5
+        for px, pz in config.POLE_POSITIONS:
+            if (cx - px) ** 2 + (cz - pz) ** 2 < (cr + pole_r) ** 2:
+                return True
+        return False
 
     t_prev = glfw.get_time()
     frame  = 0
@@ -142,9 +200,34 @@ def run():
         frame += 1
 
         if frame % 60 == 0 and dt > 0:
-            glfw.set_window_title(win, f"{config.TITLE}  |  {1.0 / dt:.0f} FPS")
+            mode = "Follow Cam" if follow_cam[0] else "Free Cam"
+            glfw.set_window_title(win, f"{config.TITLE}  |  {1.0 / dt:.0f} FPS  |  {mode}")
 
-        cam.on_keys(win, dt)
+        # ── Entity updates ────────────────────────────────────────────────────
+        prev_x, prev_z = car.x, car.z
+        car.update(win, dt)
+        if _check_collision(car.x, car.z, Car.COLLISION_RADIUS):
+            car.x, car.z  = prev_x, prev_z
+            car.speed    *= -0.2   # slight bounce on impact
+        # Knock down any pedestrian the car drives over
+        _PED_HIT_R2 = 2.0 ** 2
+        for ped in pedestrians:
+            if not ped.knocked_down:
+                px, pz = ped.world_pos
+                if (car.x - px) ** 2 + (car.z - pz) ** 2 < _PED_HIT_R2:
+                    ped.knock_down()
+        for bird in birds:
+            bird.update(dt)
+        for ped in pedestrians:
+            ped.update(dt)
+
+        # ── Camera ────────────────────────────────────────────────────────────
+        if follow_cam[0]:
+            _fol_eye, _fol_tgt = car.follow_eye_target()
+            cam.pos[:] = _fol_eye   # sync so free-cam resumes from here
+        else:
+            _fol_eye, _fol_tgt = None, None
+            cam.on_keys(win, dt)
 
         # ── SHADOW PASS ──────────────────────────────────────────────────────
         glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo)
@@ -194,6 +277,30 @@ def run():
         glBindVertexArray(pyr_vao)
         glDrawElements(GL_TRIANGLES, pyr_cnt, GL_UNSIGNED_INT, None)
 
+        # Car
+        car_bm, car_cm = car.models()
+        set_mat4(shadow_prog, "uLightMVP", light_mat @ car_bm)
+        glBindVertexArray(car_body_vao)
+        glDrawElements(GL_TRIANGLES, car_body_cnt, GL_UNSIGNED_INT, None)
+        set_mat4(shadow_prog, "uLightMVP", light_mat @ car_cm)
+        glBindVertexArray(car_cab_vao)
+        glDrawElements(GL_TRIANGLES, car_cab_cnt, GL_UNSIGNED_INT, None)
+        for wm in car.wheel_models():
+            set_mat4(shadow_prog, "uLightMVP", light_mat @ wm)
+            glBindVertexArray(wheel_vao)
+            glDrawElements(GL_TRIANGLES, wheel_cnt, GL_UNSIGNED_INT, None)
+
+        # Pedestrians
+        for ped in pedestrians:
+            pl, pt, pa, ph = ped.models()
+            for pm, pv, pc in [(pl, ped_leg_vao, ped_leg_cnt),
+                               (pt, ped_torso_vao, ped_torso_cnt),
+                               (pa, ped_arm_vao,   ped_arm_cnt),
+                               (ph, ped_head_vao,  ped_head_cnt)]:
+                set_mat4(shadow_prog, "uLightMVP", light_mat @ pm)
+                glBindVertexArray(pv)
+                glDrawElements(GL_TRIANGLES, pc, GL_UNSIGNED_INT, None)
+
         glEnable(GL_CULL_FACE)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glViewport(0, 0, fw, fh)
@@ -202,7 +309,8 @@ def run():
         glClearColor(0.05, 0.08, 0.12, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        view = cam.view()
+        view = (mat_look_at(_fol_eye, _fol_tgt)
+                if follow_cam[0] else cam.view())
         mvp  = proj @ view
 
         # Bind shadow map to unit 1 for all lit passes
@@ -339,6 +447,62 @@ def run():
             glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.LAMP_COLOR)
             glBindVertexArray(pole_lamp_vao)
             glDrawElements(GL_TRIANGLES, pole_lamp_cnt, GL_UNSIGNED_INT, None)
+
+        # Pass 8: Car  (pyramid_prog; global uniforms still set from Pass 5)
+        car_bm, car_cm = car.models()
+        set_mat4(pyramid_prog, "uMVP",      proj @ view @ car_bm)
+        set_mat4(pyramid_prog, "uModel",    car_bm)
+        set_mat4(pyramid_prog, "uLightMat", light_mat @ car_bm)
+        glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.CAR_COLOR_BODY)
+        glBindVertexArray(car_body_vao)
+        glDrawElements(GL_TRIANGLES, car_body_cnt, GL_UNSIGNED_INT, None)
+
+        set_mat4(pyramid_prog, "uMVP",      proj @ view @ car_cm)
+        set_mat4(pyramid_prog, "uModel",    car_cm)
+        set_mat4(pyramid_prog, "uLightMat", light_mat @ car_cm)
+        glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.CAR_COLOR_CAB)
+        glBindVertexArray(car_cab_vao)
+        glDrawElements(GL_TRIANGLES, car_cab_cnt, GL_UNSIGNED_INT, None)
+
+        glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.CAR_WHEEL_COLOR)
+        glBindVertexArray(wheel_vao)
+        for wm in car.wheel_models():
+            set_mat4(pyramid_prog, "uMVP",      proj @ view @ wm)
+            set_mat4(pyramid_prog, "uModel",    wm)
+            set_mat4(pyramid_prog, "uLightMat", light_mat @ wm)
+            glDrawElements(GL_TRIANGLES, wheel_cnt, GL_UNSIGNED_INT, None)
+
+        # Pass 9: Birds
+        for bird in birds:
+            bb, bw = bird.models()
+            set_mat4(pyramid_prog, "uMVP",      proj @ view @ bb)
+            set_mat4(pyramid_prog, "uModel",    bb)
+            set_mat4(pyramid_prog, "uLightMat", light_mat @ bb)
+            glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, config.BIRD_COLOR)
+            glBindVertexArray(bird_body_vao)
+            glDrawElements(GL_TRIANGLES, bird_body_cnt, GL_UNSIGNED_INT, None)
+            set_mat4(pyramid_prog, "uMVP",      proj @ view @ bw)
+            set_mat4(pyramid_prog, "uModel",    bw)
+            set_mat4(pyramid_prog, "uLightMat", light_mat @ bw)
+            glBindVertexArray(bird_wing_vao)
+            glDrawElements(GL_TRIANGLES, bird_wing_cnt, GL_UNSIGNED_INT, None)
+
+        # Pass 10: Pedestrians
+        for i, ped in enumerate(pedestrians):
+            pl, pt, pa, ph = ped.models()
+            jacket = config.PEDESTRIAN_COLORS[i % len(config.PEDESTRIAN_COLORS)]
+            for pm, pv, pc, col in [
+                (pl, ped_leg_vao,   ped_leg_cnt,   config.PED_PANTS_COLOR),
+                (pt, ped_torso_vao, ped_torso_cnt, jacket),
+                (pa, ped_arm_vao,   ped_arm_cnt,   jacket),
+                (ph, ped_head_vao,  ped_head_cnt,  config.PED_HEAD_COLOR),
+            ]:
+                set_mat4(pyramid_prog, "uMVP",      proj @ view @ pm)
+                set_mat4(pyramid_prog, "uModel",    pm)
+                set_mat4(pyramid_prog, "uLightMat", light_mat @ pm)
+                glUniform3fv(glGetUniformLocation(pyramid_prog, "uColor"), 1, col)
+                glBindVertexArray(pv)
+                glDrawElements(GL_TRIANGLES, pc, GL_UNSIGNED_INT, None)
 
         glfw.swap_buffers(win)
         glfw.poll_events()
